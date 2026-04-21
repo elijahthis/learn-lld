@@ -1,4 +1,4 @@
-#LLD Prep
+# LLD Prep
 
 01. The Classic Vending Machine
 Implement a vending machine that accepts different coins, tracks inventory, dispenses items, and returns change.
