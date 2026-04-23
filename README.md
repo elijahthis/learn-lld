@@ -1,4 +1,5 @@
 # LLD Prep
+My humble attempt at tackling/simulating some real-world-ish problems with code
 
 **01. The Classic Vending Machine:**
 Implement a vending machine that accepts different coins, tracks inventory, dispenses items, and returns change.
