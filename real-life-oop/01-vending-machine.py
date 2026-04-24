@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from typing import List
-from collections import Counter
 
 COINS_MAP = frozenset([25,50,100,200])
 DENOMS = [200, 100, 50, 25]
@@ -50,6 +49,8 @@ class Coin:
 # VendingMachine Class
 class VendingMachine:
     def __init__(self, inventory):
+        from collections import Counter
+
         self.inventory = inventory
         self._coin_balance = Counter({200: 20, 100: 20, 50: 20, 25: 0})     # denom -> count (Bank)
         self._temp_coin_balance = Counter({200: 0, 100: 0, 50: 0, 25: 0})   # denom -> count (Temporary store)
@@ -79,6 +80,8 @@ class VendingMachine:
         """
         Calculates the no. of coins of each denomination needed to give change. Raises an exception if insufficient
         """
+        from collections import Counter
+
         res = Counter()
         for d in DENOMS:
             coins_needed = change // d
@@ -108,6 +111,8 @@ class VendingMachine:
             self._temp_coin_balance[d] = 0
     
     def buy_snack(self, snack: Snack, qty: int) -> List[Coin]:
+        from collections import Counter
+        
         change_counter = Counter()
         try:
             # Validation 
