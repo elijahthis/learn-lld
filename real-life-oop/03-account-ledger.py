@@ -3,6 +3,7 @@ from typing import Self, List
 import uuid
 from datetime import datetime
 from enum import Enum
+from dataclasses import dataclass, field
 
 
 class AccountType(Enum):
@@ -18,6 +19,10 @@ class NegativeBalanceError(ValueError):
 class InsufficientFundsError(ValueError):
     def __init__(self):
         super().__init__(f"ERROR: Insufficient Funds.")
+
+class InvalidAmountError(ValueError):
+    def __init__(self):
+        super().__init__(f"ERROR: Amount cannot be negative.")
     
 class InvalidAccountTypeError(ValueError):
     def __init__(self):
@@ -35,43 +40,43 @@ class AccountNotRecognizedError(Exception):
     def __init__(self):
         super().__init__(f"ERROR: Our bank does not recognize this account")
 
-
+@dataclass(frozen=True)
 class Account:
-    def __init__(self, account_type: AccountType, default_bal=0):
-        self._balance = default_bal
-        self.account_type = account_type
-    
-    @property
-    def balance(self) -> int:
-        return self._balance
+    account_type: AccountType
+    name: str
+    ID: uuid.UUID = field(default_factory=uuid.uuid4)
 
-    def _set_balance(self, amount: int):
-        if amount < 0:
-            raise NegativeBalanceError()
-        if amount > self.balance:
-            raise InsufficientFundsError()
-        self._balance = amount
-    
-    def debit(self, amount: int):
-        if self.account_type == AccountType.ASSET:
-            self._set_balance(self.balance + amount)
-        else:
-            self._set_balance(self.balance - amount)
-    
-    def credit(self, amount: int):
-        if self.account_type == AccountType.ASSET:
-            self._set_balance(self.balance - amount)
-        else:
-            self._set_balance(self.balance + amount)
+    def __hash__(self):
+        return hash(self.ID)
+    def __eq__(self, account):
+        return isinstance(account, Account) and account.ID == self.ID
+        
 
+class NotificationService:
+    def __init__(self):
+        pass
+
+    def account_creation_alert(self, account: Account):
+        print(f"NOTIFICATION: Hello {account.name}. Welcome! Your {account.account_type} account has been successfully created with us.")
+        
+    def credit_alert(self, account: Account, amount: int):
+        print(f"CREDIT SUCCESSFUL: Congratulations {account.name}! Your account has been credited with a sum of £{float(amount/100)}.")
+    
+    def debit_alert(self, account: Account, amount: int):
+        print(f"DEBIT SUCCESSFUL: Congratulations {account.name}! Your account has been debited of a sum of £{float(amount/100)}.")
+    
+    def balance_alert(self, account: Account, balance: int):
+        print(f"ACCOUNT BALANCE: Hello {account.name}! Your account balance is £{float(balance/100)}.")
+
+@dataclass
 class Entry:
-    def __init__(self, account: Account, amount: int, is_debit: bool):
-        self.account: Account = account
-        self.amount: int = amount
-        self.is_debit: bool = is_debit
+    account: Account
+    amount: int
+    is_debit: bool
+    
 
 class EnrichedLedgerEntry:
-    def __init__(self, entry: Entry, tx_id: uuid, created_at: datetime):
+    def __init__(self, entry: Entry, tx_id: uuid.UUID, created_at: datetime):
         self.account: Account = entry.account
         self.amount: int = entry.amount
         self.is_debit: bool = entry.is_debit
@@ -79,8 +84,8 @@ class EnrichedLedgerEntry:
         self.created_at: datetime = created_at
 
 class Transaction:
-    def __init__(self, ID: uuid, entries: List[Entry], created_at: datetime):
-        self.ID: uuid = ID
+    def __init__(self, ID: uuid.UUID, entries: List[Entry], created_at: datetime):
+        self.ID: uuid.UUID = ID
         self.entries: List[Entry] = entries
         self.created_at: datetime = created_at
     
@@ -90,36 +95,14 @@ class Transaction:
 
         return total_credit == total_debit
     
-    def post(self):
-        if not self._is_balanced():
-            raise TransactionImbalanceError()
-
-        for entry in self.entries:
-            if entry.is_debit:
-                entry.account.debit(entry.amount)
-            else:
-                entry.account.credit(entry.amount)
+    
     
 class Ledger:
     def __init__(self):
         # NOTE: Protect ledger from tampering
-        self._debit_ledger: List[EnrichedLedgerEntry] = deque()  
-        self._credit_ledger: List[EnrichedLedgerEntry] = deque() 
-    
-    def _insert_credit_entry(self, transaction_ID: uuid, account: Account, amount: int, created_at: datetime):
-        self._credit_ledger.append({
-            "ID": transaction_ID,
-            "account": account,
-            "amount": amount,
-            "created_at": created_at
-        })
-    def _insert_debit_entry(self, transaction_ID: uuid, account: Account, amount: int, created_at: datetime):
-        self._debit_ledger.append({
-            "ID": transaction_ID,
-            "account": account,
-            "amount": amount,
-            "created_at": created_at
-        })
+        self._ledger: List[EnrichedLedgerEntry] = deque()
+        self._processed_tx_ids = set()
+        self.notification_service: NotificationService = NotificationService() 
     
     def create_transaction(self, amount: int, debit_account: Account, credit_account: Account, created_at: datetime) -> Transaction:
         tx_id = uuid.uuid4()
@@ -127,78 +110,144 @@ class Ledger:
         return Transaction(
             tx_id, 
         [
-            Entry(debit_account, amount, True),
-            Entry(credit_account, amount, False)
+            Entry(account=debit_account, amount=amount, is_debit=True),
+            Entry(account=credit_account, amount=amount, is_debit=False)
         ], 
         created_at
         )
-
-    def record_transaction(self, tx: Transaction):
-        for entry in tx.entries:
-            if entry.is_debit:
-                self._debit_ledger.append(EnrichedLedgerEntry(entry, tx.ID, tx.created_at))
-            else:
-                self._credit_ledger.append(EnrichedLedgerEntry(entry, tx.ID, tx.created_at))
     
-    def create_reverse_transaction(self, tx: Transaction, created_at: datetime):
+    def create_reverse_transaction(self, tx: Transaction, created_at: datetime) -> Transaction:
         new_tx_id = uuid.uuid4()
         
         return Transaction(
             new_tx_id,
-            [Entry(e.account, e.amount, not e.is_debit) for e in tx.entries], 
+            [Entry(account=e.account, amount=e.amount, is_debit=(not e.is_debit)) for e in tx.entries], 
             created_at
         )
-                
+    
+    def _send_alert(self, entry: Entry):
+        if entry.is_debit:
+            self.notification_service.debit_alert(entry.account, entry.amount)
+        else:
+            self.notification_service.credit_alert(entry.account, entry.amount)
+    
+    def commit(self, tx: Transaction):
+        if tx.ID in self._processed_tx_ids:
+            return
+        
+        if not tx._is_balanced():
+            raise TransactionImbalanceError()
+        
+        for entry in tx.entries:
+            self._ledger.append(EnrichedLedgerEntry(entry, tx.ID, tx.created_at))
+            
+            self._send_alert(entry)
+
+        self._processed_tx_ids.add(tx.ID)
+        
+    def calculate_account_balance(self, account: Account) -> int:
+        total_debits = total_credits = 0
+        for entry in self._ledger:
+            if entry.account == account:
+                if entry.is_debit:
+                    total_debits += entry.amount
+                else:
+                    total_credits += entry.amount
+        
+        return total_debits - total_credits if account.account_type == AccountType.ASSET else total_credits - total_debits
 
 
 class Bank:
     def __init__(self):
         self.ledger = Ledger()
-        self.asset_account = Account(AccountType.ASSET)
-        self.customer_accounts = set()
+        self.asset_account = Account(account_type=AccountType.ASSET, name="Bank Assets")
+        self._customer_account_ids = set()
+        self.notification_service = NotificationService()
     
-    def create_account(self, account_type: AccountType) -> Account:
+    def create_account(self, account_type: AccountType, name: str) -> Account:
         if not isinstance(account_type, AccountType):
             raise InvalidAccountTypeError()
         if account_type == AccountType.ASSET:
             raise UnauthorizedAssetAccountCreationError()
         
-        new_acct = Account(account_type)
-        self.customer_accounts.add(new_acct)
+        new_acct = Account(account_type=account_type, name=name)
+        self._customer_account_ids.add(new_acct.ID)
+
+        self.notification_service.account_creation_alert(new_acct)
+        
         return new_acct
+    
+    def _get_account_balance(self, account: Account) -> int:
+        return self.ledger.calculate_account_balance(account)
+    
+    def print_account_balance(self, account: Account):
+        bal = self._get_account_balance(account)
+        self.notification_service.balance_alert(account, bal)
 
     def _verify_account_is_customer(self, account: Account):
-        if account not in self.customer_accounts:
+        if account.ID not in self._customer_account_ids:
             raise AccountNotRecognizedError()
+    
+    def _verify_balance_eligibility(self, account: Account, amount: int):
+        bal = self._get_account_balance(account)
+        if bal < amount:
+            raise InsufficientFundsError()
+    
+    def _verify_amount(self, amount: int):
+        if not isinstance(amount, int) or amount < 1:
+            raise InvalidAmountError()
 
     # main user transaction types
-    def deposit(self, credit_account: Account, amount: int, created_at: datetime):
-        self._verify_account_is_customer()
+    def deposit(self, credit_account: Account, amount: int, created_at: datetime = None):
+        created_at = created_at or datetime.now()
+        
+        self._verify_account_is_customer(credit_account)
+        self._verify_amount(amount)
         
         tx = self.ledger.create_transaction(amount, self.asset_account, credit_account, created_at)
-        tx.post()
-        self.ledger.record_transaction(tx)
-    def withdraw(self, debit_account: Account, amount: int, created_at: datetime):
-        self._verify_account_is_customer()
+        self.ledger.commit(tx)
+
+    def withdraw(self, debit_account: Account, amount: int, created_at: datetime = None):
+        created_at = created_at or datetime.now()
+
+        self._verify_account_is_customer(debit_account)
+        self._verify_amount(amount)
+        self._verify_balance_eligibility(debit_account, amount)
 
         tx = self.ledger.create_transaction(amount, debit_account, self.asset_account, created_at)
-        tx.post()
-        self.ledger.record_transaction(tx)
-    def transfer(self, debit_account: Account, credit_account: Account, amount: int, created_at: datetime):
-        self._verify_account_is_customer()
+        self.ledger.commit(tx)
+        
+    def transfer(self, debit_account: Account, credit_account: Account, amount: int, created_at: datetime = None):
+        created_at = created_at or datetime.now()
+        
+        self._verify_account_is_customer(debit_account)
+        self._verify_account_is_customer(credit_account)
+        self._verify_amount(amount)
+        self._verify_balance_eligibility(debit_account, amount)
 
         tx = self.ledger.create_transaction(amount, debit_account, credit_account, created_at)
-        tx.post()
-        self.ledger.record_transaction(tx)
+        self.ledger.commit(tx)
     
     def reverse_transaction(self, tx: Transaction):
         new_tx = self.ledger.create_reverse_transaction(tx, datetime.now())
-        new_tx.post()
-        self.ledger.record_transaction(new_tx)
+        self.ledger.commit(new_tx)
+
 
 
 # Testing
 eBank = Bank()
 
-eliCheckingAcct = eBank.create_account(AccountType.CHECKING)
-eBank.deposit(eliCheckingAcct, 50000, datetime.now())
+eliCheckingAcct = eBank.create_account(AccountType.CHECKING, "Elijah")
+eliSavingsAcct = eBank.create_account(AccountType.SAVINGS, "Elijah")
+
+print("-----------------------------------")
+eBank.deposit(eliCheckingAcct, 50000)
+eBank.deposit(eliSavingsAcct, 50000)
+eBank.transfer(eliCheckingAcct, eliSavingsAcct, 30000)
+# eBank.withdraw(eliCheckingAcct, 50000)
+
+print("-----------------------------------")
+eBank.print_account_balance(eliCheckingAcct)
+eBank.print_account_balance(eliSavingsAcct)
+eBank.print_account_balance(eBank.asset_account)
+
