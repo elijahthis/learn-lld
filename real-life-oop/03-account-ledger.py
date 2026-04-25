@@ -1,9 +1,10 @@
-from collections import deque
+from collections import deque, defaultdict
 from typing import Self, List
 import uuid
 from datetime import datetime
 from enum import Enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, InitVar
+import threading
 
 
 class AccountType(Enum):
@@ -60,34 +61,42 @@ class NotificationService:
         print(f"NOTIFICATION: Hello {account.name}. Welcome! Your {account.account_type} account has been successfully created with us.")
         
     def credit_alert(self, account: Account, amount: int):
-        print(f"CREDIT SUCCESSFUL: Congratulations {account.name}! Your account has been credited with a sum of £{float(amount/100)}.")
+        print(f"CREDIT SUCCESSFUL: Your account has been credited with a sum of £{float(amount/100):.2f}")
     
     def debit_alert(self, account: Account, amount: int):
-        print(f"DEBIT SUCCESSFUL: Congratulations {account.name}! Your account has been debited of a sum of £{float(amount/100)}.")
+        print(f"DEBIT SUCCESSFUL: Your account has been debited of a sum of £{float(amount/100):.2f}")
     
     def balance_alert(self, account: Account, balance: int):
-        print(f"ACCOUNT BALANCE: Hello {account.name}! Your account balance is £{float(balance/100)}.")
+        print(f"ACCOUNT BALANCE: Hello {account.name}! Your account balance is £{float(balance/100):.2f}")
 
-@dataclass
+@dataclass(frozen=True)
 class Entry:
     account: Account
     amount: int
     is_debit: bool
     
 
+@dataclass(frozen=True)
 class EnrichedLedgerEntry:
-    def __init__(self, entry: Entry, tx_id: uuid.UUID, created_at: datetime):
-        self.account: Account = entry.account
-        self.amount: int = entry.amount
-        self.is_debit: bool = entry.is_debit
-        self.tx_id = tx_id
-        self.created_at: datetime = created_at
+    account: Account = field(init=False)
+    amount: int = field(init=False)
+    is_debit: bool = field(init=False)
+    tx_id: uuid.UUID
+    created_at: datetime
 
+    entry: InitVar[Entry]
+    
+    def __post_init__(self, entry: Entry):
+        object.__setattr__(self, "account", entry.account)
+        object.__setattr__(self, "amount", entry.amount)
+        object.__setattr__(self, "is_debit", entry.is_debit)
+
+
+@dataclass(frozen=True)
 class Transaction:
-    def __init__(self, ID: uuid.UUID, entries: List[Entry], created_at: datetime):
-        self.ID: uuid.UUID = ID
-        self.entries: List[Entry] = entries
-        self.created_at: datetime = created_at
+    entries: List[Entry]
+    created_at: datetime
+    ID: uuid.UUID = field(default_factory=uuid.uuid4)
     
     def _is_balanced(self):
         total_debit = sum(e.amount for e in self.entries if e.is_debit)
@@ -96,33 +105,35 @@ class Transaction:
         return total_credit == total_debit
     
     
-    
 class Ledger:
     def __init__(self):
         # NOTE: Protect ledger from tampering
-        self._ledger: List[EnrichedLedgerEntry] = deque()
+        self._ledger: List[EnrichedLedgerEntry] = []
         self._processed_tx_ids = set()
-        self.notification_service: NotificationService = NotificationService() 
+        self.notification_service: NotificationService = NotificationService()
+
+        self.balance_checkpoint: int = 0
+        self.balance_snapshot = defaultdict(int)      # {account_id -> balance} to be updated everyday 
     
     def create_transaction(self, amount: int, debit_account: Account, credit_account: Account, created_at: datetime) -> Transaction:
         tx_id = uuid.uuid4()
         
         return Transaction(
-            tx_id, 
-        [
-            Entry(account=debit_account, amount=amount, is_debit=True),
-            Entry(account=credit_account, amount=amount, is_debit=False)
-        ], 
-        created_at
+            ID=tx_id, 
+            entries=[
+                Entry(account=debit_account, amount=amount, is_debit=True),
+                Entry(account=credit_account, amount=amount, is_debit=False)
+            ], 
+            created_at=created_at
         )
     
     def create_reverse_transaction(self, tx: Transaction, created_at: datetime) -> Transaction:
         new_tx_id = uuid.uuid4()
         
         return Transaction(
-            new_tx_id,
-            [Entry(account=e.account, amount=e.amount, is_debit=(not e.is_debit)) for e in tx.entries], 
-            created_at
+            ID=new_tx_id,
+            entries=[Entry(account=e.account, amount=e.amount, is_debit=(not e.is_debit)) for e in tx.entries], 
+            created_at=created_at
         )
     
     def _send_alert(self, entry: Entry):
@@ -138,23 +149,44 @@ class Ledger:
         if not tx._is_balanced():
             raise TransactionImbalanceError()
         
-        for entry in tx.entries:
-            self._ledger.append(EnrichedLedgerEntry(entry, tx.ID, tx.created_at))
-            
-            self._send_alert(entry)
-
+        enriched_entries = [EnrichedLedgerEntry(entry=entry, tx_id=tx.ID, created_at=tx.created_at) for entry in tx.entries]
+        self._ledger.extend(enriched_entries)
         self._processed_tx_ids.add(tx.ID)
         
+        for entry in tx.entries:
+            self._send_alert(entry)
+    
     def calculate_account_balance(self, account: Account) -> int:
+        bal = self.balance_snapshot[account.ID]
+        
         total_debits = total_credits = 0
-        for entry in self._ledger:
+        for entry in self._ledger[self.balance_checkpoint:]:
             if entry.account == account:
                 if entry.is_debit:
                     total_debits += entry.amount
                 else:
                     total_credits += entry.amount
         
-        return total_debits - total_credits if account.account_type == AccountType.ASSET else total_credits - total_debits
+        bal_update = total_debits - total_credits if account.account_type == AccountType.ASSET else total_credits - total_debits
+        return bal + bal_update
+
+    def _cache_balance_snapshot(self):
+        for entry in self._ledger[self.balance_checkpoint:]:
+            if entry.account.account_type == AccountType.ASSET:
+                if entry.is_debit:
+                    self.balance_snapshot[entry.account.ID] += entry.amount
+                else:
+                    self.balance_snapshot[entry.account.ID] -= entry.amount
+            else:
+                if entry.is_debit:
+                    self.balance_snapshot[entry.account.ID] -= entry.amount
+                else:
+                    self.balance_snapshot[entry.account.ID] += entry.amount
+        
+        self.balance_checkpoint = len(self._ledger)
+
+    def daily_cron(self):
+        self._cache_balance_snapshot()
 
 
 class Bank:
@@ -163,6 +195,7 @@ class Bank:
         self.asset_account = Account(account_type=AccountType.ASSET, name="Bank Assets")
         self._customer_account_ids = set()
         self.notification_service = NotificationService()
+        self.tx_lock = threading.Lock()
     
     def create_account(self, account_type: AccountType, name: str) -> Account:
         if not isinstance(account_type, AccountType):
@@ -204,18 +237,20 @@ class Bank:
         self._verify_account_is_customer(credit_account)
         self._verify_amount(amount)
         
-        tx = self.ledger.create_transaction(amount, self.asset_account, credit_account, created_at)
-        self.ledger.commit(tx)
+        with self.tx_lock:
+            tx = self.ledger.create_transaction(amount, self.asset_account, credit_account, created_at)
+            self.ledger.commit(tx)
 
     def withdraw(self, debit_account: Account, amount: int, created_at: datetime = None):
         created_at = created_at or datetime.now()
 
         self._verify_account_is_customer(debit_account)
         self._verify_amount(amount)
-        self._verify_balance_eligibility(debit_account, amount)
 
-        tx = self.ledger.create_transaction(amount, debit_account, self.asset_account, created_at)
-        self.ledger.commit(tx)
+        with self.tx_lock:
+            self._verify_balance_eligibility(debit_account, amount)
+            tx = self.ledger.create_transaction(amount, debit_account, self.asset_account, created_at)
+            self.ledger.commit(tx)
         
     def transfer(self, debit_account: Account, credit_account: Account, amount: int, created_at: datetime = None):
         created_at = created_at or datetime.now()
@@ -223,14 +258,16 @@ class Bank:
         self._verify_account_is_customer(debit_account)
         self._verify_account_is_customer(credit_account)
         self._verify_amount(amount)
-        self._verify_balance_eligibility(debit_account, amount)
 
-        tx = self.ledger.create_transaction(amount, debit_account, credit_account, created_at)
-        self.ledger.commit(tx)
+        with self.tx_lock:
+            self._verify_balance_eligibility(debit_account, amount)
+            tx = self.ledger.create_transaction(amount, debit_account, credit_account, created_at)
+            self.ledger.commit(tx)
     
     def reverse_transaction(self, tx: Transaction):
-        new_tx = self.ledger.create_reverse_transaction(tx, datetime.now())
-        self.ledger.commit(new_tx)
+        with self.tx_lock:
+            new_tx = self.ledger.create_reverse_transaction(tx, datetime.now())
+            self.ledger.commit(new_tx)
 
 
 
@@ -250,4 +287,7 @@ print("-----------------------------------")
 eBank.print_account_balance(eliCheckingAcct)
 eBank.print_account_balance(eliSavingsAcct)
 eBank.print_account_balance(eBank.asset_account)
+
+print("-----------------------------------")
+eBank.ledger.daily_cron()
 

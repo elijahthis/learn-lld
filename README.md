@@ -8,5 +8,5 @@ Implement a vending machine that accepts different coins, tracks inventory, disp
 **02. Library Management System:**
 Design a system where patrons can search for, reserve, and check out books. Include logic for due dates and calculating late fees
 
-**03. Simple Bank Account Ledger:**
-Create a banking system with different account types (Checking, Savings) that handles deposits, withdrawals, and monthly interest calculations
+**03. Double-Entry Bank Account Ledger:**
+Create a banking system with different account types (Checking, Savings) that handles deposits, withdrawals, etc.
